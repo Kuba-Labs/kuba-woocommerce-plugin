@@ -1,0 +1,347 @@
+<?php
+
+namespace Kuba_Labs;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * Registers the REST endpoint that receives the OAuth callback from Kuba frontend.
+ *
+ * Flow:
+ * 1. Merchant clicks "Connect to Kuba Labs" in WC Settings.
+ * 2. Redirected to app.kubalabs.com/connect/woocommerce with store_id, store_url, callback_url.
+ * 3. Merchant logs in / approves.
+ * 4. Kuba backend generates webhook_secret, sends it via POST to our callback_url.
+ * 5. We also generate WooCommerce REST API keys and send them to Kuba backend.
+ */
+class REST {
+
+	public function __construct() {
+		add_action( 'rest_api_init', [ $this, 'register_routes' ] );
+	}
+
+	public function register_routes(): void {
+		register_rest_route( 'kuba-labs/v1', '/connect', [
+			'methods'             => 'POST',
+			'callback'            => [ $this, 'handle_connect' ],
+			'permission_callback' => '__return_true',
+		] );
+
+		register_rest_route( 'kuba-labs/v1', '/policies', [
+			'methods'             => 'GET',
+			'callback'            => [ $this, 'handle_get_policies' ],
+			'permission_callback' => '__return_true',
+		] );
+
+		register_rest_route( 'kuba-labs/v1', '/consent', [
+			'methods'             => 'POST',
+			'callback'            => [ $this, 'handle_consent' ],
+			'permission_callback' => function () {
+				return wp_verify_nonce( sanitize_text_field( $_SERVER['HTTP_X_WP_NONCE'] ?? '' ), 'wp_rest' );
+			},
+			'args'                => [
+				'phone'         => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
+				'consent'       => [ 'required' => true, 'type' => 'boolean' ],
+				'session_token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
+			],
+		] );
+
+		register_rest_route( 'kuba-labs/v1', '/last-order-by-phone', [
+			'methods'             => 'GET',
+			'callback'            => [ $this, 'handle_last_order_by_phone' ],
+			'permission_callback' => [ $this, 'check_wc_api_key_permission' ],
+			'args'                => [
+				'phone' => [
+					'required'          => true,
+					'sanitize_callback' => 'sanitize_text_field',
+				],
+			],
+		] );
+	}
+
+	/**
+	 * Verify that the request contains valid WooCommerce REST API credentials.
+	 * Supports Basic Auth (HTTPS) and query param auth (consumer_key/consumer_secret).
+	 */
+	public function check_wc_api_key_permission( \WP_REST_Request $request ): bool {
+		// Try Basic Auth header first.
+		$consumer_key    = '';
+		$consumer_secret = '';
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		if ( ! empty( $_SERVER['PHP_AUTH_USER'] ) ) {
+			$consumer_key    = sanitize_text_field( $_SERVER['PHP_AUTH_USER'] );
+			$consumer_secret = sanitize_text_field( $_SERVER['PHP_AUTH_PW'] ?? '' );
+		}
+		// Fall back to query params.
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		if ( empty( $consumer_key ) && ! empty( $_GET['consumer_key'] ) ) {
+			$consumer_key    = sanitize_text_field( wp_unslash( $_GET['consumer_key'] ) );
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$consumer_secret = sanitize_text_field( wp_unslash( $_GET['consumer_secret'] ?? '' ) );
+		}
+
+		if ( empty( $consumer_key ) || empty( $consumer_secret ) ) {
+			return false;
+		}
+
+		// WC stores hashed consumer_key in the DB.
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$row = $wpdb->get_row( $wpdb->prepare(
+			"SELECT consumer_secret, permissions FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s",
+			wc_api_hash( $consumer_key )
+		) );
+
+		if ( ! $row ) {
+			return false;
+		}
+
+		return $row->consumer_secret === $consumer_secret;
+	}
+
+	/**
+	 * Save WhatsApp consent from the checkout page.
+	 * Called immediately when the customer toggles the checkbox.
+	 */
+	public function handle_consent( \WP_REST_Request $request ): \WP_REST_Response {
+		$phone         = $request->get_param( 'phone' );
+		$consent       = (bool) $request->get_param( 'consent' );
+		$session_token = $request->get_param( 'session_token' );
+
+		Consent_Table::save_consent( $phone, $consent, $session_token );
+
+		return new \WP_REST_Response( [ 'success' => true ], 200 );
+	}
+
+	/**
+	 * Returns store policy pages (privacy, terms & conditions, refund, etc.).
+	 *
+	 * Collects pages from:
+	 * - WordPress privacy policy page (wp_page_for_privacy_policy)
+	 * - WooCommerce terms page (woocommerce_terms_page_id)
+	 * - WooCommerce refund/returns page (woocommerce_refund_returns_page_id)
+	 */
+	public function handle_get_policies(): \WP_REST_Response {
+		$policy_sources = [
+			'wp_page_for_privacy_policy'           => 'Privacy Policy',
+			'woocommerce_terms_page_id'            => 'Terms & Conditions',
+			'woocommerce_refund_returns_page_id'   => 'Refund & Returns Policy',
+		];
+
+		$policies = [];
+		$seen_ids = [];
+
+		foreach ( $policy_sources as $option => $fallback_title ) {
+			$page_id = (int) get_option( $option, 0 );
+			if ( $page_id <= 0 || isset( $seen_ids[ $page_id ] ) ) {
+				continue;
+			}
+
+			$page = get_post( $page_id );
+			if ( ! $page || 'publish' !== $page->post_status ) {
+				continue;
+			}
+
+			$seen_ids[ $page_id ] = true;
+			$policies[] = [
+				'title'   => $page->post_title ?: $fallback_title,
+				'content' => apply_filters( 'the_content', $page->post_content ),
+			];
+		}
+
+		return new \WP_REST_Response( $policies, 200 );
+	}
+
+	/**
+	 * Returns the creation date of the most recent order for a given phone number.
+	 *
+	 * Searches billing_phone using wc_get_orders() which works with both
+	 * classic (CPT) and HPOS storage.
+	 */
+	public function handle_last_order_by_phone( \WP_REST_Request $request ): \WP_REST_Response {
+		$phone  = $request->get_param( 'phone' );
+		$digits = preg_replace( '/\D/', '', $phone );
+
+		// Build a set of plausible variants for the phone number.
+		// Merchants store phones inconsistently — with or without country code,
+		// with or without +, with spaces/dashes, etc.
+		$variants = array_unique( array_filter( [
+			$phone,                       // as-is from backend
+			$digits,                      // digits only (e.g. "393348299274")
+			'+' . $digits,                // with + prefix
+			ltrim( $digits, '0' ),        // strip leading zeros
+		] ) );
+
+		// Also try without common country code prefixes (1-3 digit codes).
+		// This handles the case where backend sends "+393348299274" but WC
+		// stores "3348299274" (no country code). We try removing 1, 2, and 3
+		// digit prefixes to cover most country codes.
+		if ( strlen( $digits ) >= 9 ) {
+			for ( $strip = 1; $strip <= 3; $strip++ ) {
+				$without_cc = substr( $digits, $strip );
+				if ( strlen( $without_cc ) >= 7 ) {
+					$variants[] = $without_cc;
+				}
+			}
+			$variants = array_unique( $variants );
+		}
+
+		foreach ( $variants as $variant ) {
+			$orders = wc_get_orders( [
+				'billing_phone' => $variant,
+				'orderby'       => 'date',
+				'order'         => 'DESC',
+				'limit'         => 1,
+			] );
+
+			if ( ! empty( $orders ) ) {
+				return $this->order_date_response( $orders[0] );
+			}
+		}
+
+		return new \WP_REST_Response( [ 'date_created_gmt' => null ], 200 );
+	}
+
+	private function order_date_response( \WC_Order $order ): \WP_REST_Response {
+		return new \WP_REST_Response( [
+			'date_created_gmt' => $order->get_date_created()
+				? $order->get_date_created()->format( 'Y-m-d\TH:i:s' )
+				: null,
+		], 200 );
+	}
+
+	/**
+	 * Receives the connection handshake from Kuba backend.
+	 *
+	 * Expected JSON body:
+	 * {
+	 *   "store_id":       "uuid — must match our local store_id",
+	 *   "webhook_secret": "string — HMAC signing key for outgoing events"
+	 * }
+	 *
+	 * On success, this endpoint:
+	 * 1. Stores the webhook_secret.
+	 * 2. Generates WooCommerce REST API keys.
+	 * 3. Returns the keys to Kuba backend so it can pull data.
+	 */
+	public function handle_connect( \WP_REST_Request $request ): \WP_REST_Response {
+		$store_id       = sanitize_text_field( $request->get_param( 'store_id' ) );
+		$webhook_secret = sanitize_text_field( $request->get_param( 'webhook_secret' ) );
+
+		if ( empty( $store_id ) || empty( $webhook_secret ) ) {
+			return new \WP_REST_Response(
+				[ 'error' => 'Missing required parameters.' ],
+				400
+			);
+		}
+
+		// Verify the store_id matches.
+		$local_store_id = Plugin::get_store_id();
+		if ( $store_id !== $local_store_id ) {
+			return new \WP_REST_Response(
+				[ 'error' => 'Store ID mismatch.' ],
+				403
+			);
+		}
+
+		// Verify the request is signed by the sender who knows webhook_secret.
+		// The backend signs the raw JSON body with HMAC-SHA256(webhook_secret).
+		$signature = $request->get_header( 'X-Kuba-Signature' );
+		$raw_body  = $request->get_body();
+
+		if ( empty( $signature ) || empty( $raw_body ) ) {
+			return new \WP_REST_Response(
+				[ 'error' => 'Missing signature.' ],
+				401
+			);
+		}
+
+		$expected = hash_hmac( 'sha256', $raw_body, $webhook_secret );
+		if ( ! hash_equals( $expected, $signature ) ) {
+			return new \WP_REST_Response(
+				[ 'error' => 'Invalid signature.' ],
+				401
+			);
+		}
+
+		// Store webhook secret. Auto-load because is_connected() checks it on every request.
+		update_option( 'kuba_labs_webhook_secret', $webhook_secret, true );
+		update_option( 'kuba_labs_connected_at', gmdate( 'c' ), false );
+
+		// Generate WooCommerce REST API keys for this connection.
+		$api_keys = $this->generate_wc_api_keys();
+		if ( is_wp_error( $api_keys ) ) {
+			return new \WP_REST_Response(
+				[ 'error' => $api_keys->get_error_message() ],
+				500
+			);
+		}
+
+		return new \WP_REST_Response( [
+			'success'         => true,
+			'store_url'       => get_site_url(),
+			'consumer_key'    => $api_keys['consumer_key'],
+			'consumer_secret' => $api_keys['consumer_secret'],
+		], 200 );
+	}
+
+	/**
+	 * Create a WooCommerce REST API key pair for Kuba Labs.
+	 *
+	 * Uses the same method WooCommerce uses internally.
+	 * Keys are tied to the first administrator (by ID) since this endpoint
+	 * is called by the Kuba backend (no WordPress session / current user).
+	 */
+	private function generate_wc_api_keys(): array|\WP_Error {
+		global $wpdb;
+
+		// Remove old Kuba keys if reconnecting.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$wpdb->delete(
+			$wpdb->prefix . 'woocommerce_api_keys',
+			[ 'description' => 'Kuba Labs' ],
+			[ '%s' ]
+		);
+
+		$consumer_key    = 'ck_' . wc_rand_hash();
+		$consumer_secret = 'cs_' . wc_rand_hash();
+
+		// Use the first admin by ID for deterministic key assignment.
+		$admin_users = get_users( [
+			'role'    => 'administrator',
+			'number'  => 1,
+			'orderby' => 'ID',
+			'order'   => 'ASC',
+		] );
+
+		if ( empty( $admin_users ) ) {
+			return new \WP_Error( 'no_admin', 'No administrator user found.' );
+		}
+
+		$user_id = $admin_users[0]->ID;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$result = $wpdb->insert(
+			$wpdb->prefix . 'woocommerce_api_keys',
+			[
+				'user_id'         => $user_id,
+				'description'     => 'Kuba Labs',
+				'permissions'     => 'read',
+				'consumer_key'    => wc_api_hash( $consumer_key ),
+				'consumer_secret' => $consumer_secret,
+				'truncated_key'   => substr( $consumer_key, -7 ),
+			],
+			[ '%d', '%s', '%s', '%s', '%s', '%s' ]
+		);
+
+		if ( ! $result ) {
+			return new \WP_Error( 'db_error', 'Failed to create API keys.' );
+		}
+
+		return [
+			'consumer_key'    => $consumer_key,
+			'consumer_secret' => $consumer_secret,
+		];
+	}
+}
