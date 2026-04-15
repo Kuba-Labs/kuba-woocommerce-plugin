@@ -210,16 +210,13 @@ class Checkout {
 			return;
 		}
 
-		// Extract digits only.
-		$digits = preg_replace( '/[^0-9]/', '', $phone );
-
-		// If the phone already starts with the calling code, don't double-prepend.
-		// e.g. calling_code="39", digits="393348299274" → already has it.
-		if ( str_starts_with( $digits, $calling_code ) ) {
-			$normalized = '+' . $digits;
+		// If the customer typed a + prefix, they already included the country
+		// code — just normalize to digits with +.
+		if ( str_starts_with( trim( $phone ), '+' ) ) {
+			$normalized = '+' . preg_replace( '/[^0-9]/', '', $phone );
 		} else {
-			// Strip leading zeros (local format) and prepend.
-			$digits     = ltrim( $digits, '0' );
+			// Local format: strip leading zeros and prepend the selected code.
+			$digits     = ltrim( preg_replace( '/[^0-9]/', '', $phone ), '0' );
 			$normalized = '+' . $calling_code . $digits;
 		}
 
@@ -254,7 +251,7 @@ class Checkout {
 		}
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing
 		if ( '' === $consent && isset( $_POST['kuba_whatsapp_consent'] ) ) {
-			$consent = $_POST['kuba_whatsapp_consent'];
+			$consent = sanitize_text_field( wp_unslash( $_POST['kuba_whatsapp_consent'] ) );
 		}
 
 		$is_opted_in = in_array( $consent, [ '1', 'true', true, 1 ], true );

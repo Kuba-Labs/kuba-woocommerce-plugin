@@ -27,7 +27,8 @@ services:
       WORDPRESS_DEBUG: 1
     volumes:
       # Mount your plugin source directly — edits are live-reloaded
-      - ./plugin:/var/www/html/wp-content/plugins/kuba-labs
+      # Read-only so WP "Delete" can't rm your source files
+      - ./plugin:/var/www/html/wp-content/plugins/kuba-labs:ro
       # Persist WordPress files so WooCommerce install survives restarts
       - wp_data:/var/www/html
 

@@ -16,7 +16,8 @@ docker compose exec wordpress bash -c '
   if ! grep -q "KUBA_LABS_API_BASE" /var/www/html/wp-config.php; then
     sed -i "/\/\* That'\''s all, stop editing/i\\
 define( '\''KUBA_LABS_API_BASE'\'', '\''http://host.docker.internal:8080'\'' );\\
-define( '\''KUBA_LABS_FRONTEND_BASE'\'', '\''http://localhost:5173'\'' );" /var/www/html/wp-config.php
+define( '\''KUBA_LABS_FRONTEND_BASE'\'', '\''http://localhost:5173'\'' );\\
+define( '\''KUBA_LABS_WIDGET_API_BASE'\'', '\''http://localhost:8080'\'' );" /var/www/html/wp-config.php
     echo "Added local dev constants to wp-config.php"
   else
     echo "Local dev constants already present in wp-config.php"

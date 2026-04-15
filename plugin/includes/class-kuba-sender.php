@@ -29,7 +29,13 @@ class Sender {
 			return; // Entity deleted or not found — skip silently.
 		}
 
-		$this->send( $topic, $data );
+		// Pass through mapped_event from the event args (set by Events class).
+		$extra = [];
+		if ( isset( $args['mapped_event'] ) ) {
+			$extra['mapped_event'] = $args['mapped_event'];
+		}
+
+		$this->send( $topic, $data, $extra );
 	}
 
 	// ------------------------------------------------------------------
@@ -38,6 +44,11 @@ class Sender {
 
 	private function hydrate( string $topic, array $args ): ?array {
 		if ( str_starts_with( $topic, 'order.' ) || str_starts_with( $topic, 'checkout.' ) ) {
+			// Classic checkout capture — no WC order to hydrate from.
+			if ( ! empty( $args['capture_key'] ) ) {
+				return $this->hydrate_capture( $args['capture_key'] );
+			}
+
 			$order = wc_get_order( $args['order_id'] ?? 0 );
 			if ( ! $order ) {
 				return null;
@@ -63,6 +74,33 @@ class Sender {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Build a minimal order-shaped payload from a classic checkout capture
+	 * stored in wp_options. Uses a stable numeric ID so the backend can parse
+	 * it the same way as a real order ID.
+	 */
+	private function hydrate_capture( string $capture_key ): ?array {
+		$data = get_option( $capture_key );
+		if ( ! is_array( $data ) ) {
+			return null;
+		}
+
+		// Stable numeric ID derived from the capture key.
+		$numeric_id = hexdec( substr( md5( $capture_key ), 0, 7 ) );
+
+		return [
+			'id'      => $numeric_id,
+			'billing' => [
+				'phone'      => $data['phone'] ?? '',
+				'email'      => $data['email'] ?? '',
+				'first_name' => $data['first_name'] ?? '',
+				'last_name'  => $data['last_name'] ?? '',
+				'country'    => $data['country'] ?? '',
+			],
+			'total' => $data['cart_total'] ?? '0',
+		];
 	}
 
 	/**
@@ -127,7 +165,7 @@ class Sender {
 	// HTTP delivery with HMAC signing
 	// ------------------------------------------------------------------
 
-	private function send( string $topic, array $data ): void {
+	private function send( string $topic, array $data, array $extra = [] ): void {
 		$webhook_secret = get_option( 'kuba_labs_webhook_secret', '' );
 		$store_id       = Plugin::get_store_id();
 
@@ -135,11 +173,19 @@ class Sender {
 			return;
 		}
 
-		$payload = wp_json_encode( [
-			'topic'     => $topic,
-			'timestamp' => gmdate( 'c' ),
-			'data'      => $data,
-		] );
+		$envelope = [
+			'topic'         => $topic,
+			'timestamp'     => gmdate( 'c' ),
+			'tracking_mode' => get_option( 'kuba_labs_tracking_mode', 'kuba' ),
+			'data'          => $data,
+		];
+
+		// Merge in mapped_event etc. at the envelope level.
+		foreach ( $extra as $key => $value ) {
+			$envelope[ $key ] = $value;
+		}
+
+		$payload = wp_json_encode( $envelope );
 
 		$signature = hash_hmac( 'sha256', $payload, $webhook_secret );
 

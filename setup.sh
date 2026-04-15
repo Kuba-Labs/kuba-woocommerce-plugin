@@ -80,9 +80,12 @@ echo "Setting up local dev connection..."
 STORE_ID="00000000-0000-0000-0000-000000000001"
 WEBHOOK_SECRET="test-webhook-secret-for-local-e2e"
 
+WIDGET_KEY="a0000000-0000-0000-0000-000000000001"
+
 docker compose exec wordpress wp option update kuba_labs_store_id "$STORE_ID" --allow-root
 docker compose exec wordpress wp option update kuba_labs_webhook_secret "$WEBHOOK_SECRET" --allow-root
 docker compose exec wordpress wp option update kuba_labs_connected_at "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" --allow-root
+docker compose exec wordpress wp option update kuba_labs_widget_key "$WIDGET_KEY" --allow-root
 
 # Generate WC REST API keys for the backend to use.
 # Fixed keys so backend test constants never need updating.

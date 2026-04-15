@@ -66,6 +66,9 @@ final class Plugin {
 		}
 		check_admin_referer( 'kuba_labs_disconnect' );
 
+		// Notify backend before clearing credentials (needs secret for HMAC).
+		kuba_labs_notify_disconnect();
+
 		delete_option( 'kuba_labs_webhook_secret' );
 		delete_option( 'kuba_labs_connected_at' );
 

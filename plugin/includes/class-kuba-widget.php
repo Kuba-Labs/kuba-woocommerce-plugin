@@ -22,15 +22,28 @@ class Widget {
 			return;
 		}
 
-		$store_id = Plugin::get_store_id();
-		if ( empty( $store_id ) ) {
+		// Respect the widget toggle in WooCommerce settings.
+		if ( 'yes' !== get_option( 'kuba_labs_widget_enabled', 'yes' ) ) {
 			return;
 		}
 
+		$widget_key = get_option( 'kuba_labs_widget_key', '' );
+		if ( empty( $widget_key ) ) {
+			return;
+		}
+
+		// For local dev: the widget JS runs in the customer's browser, so it
+		// needs localhost rather than the Docker-internal hostname.
+		$api_attr = '';
+		if ( defined( 'KUBA_LABS_WIDGET_API_BASE' ) ) {
+			$api_attr = sprintf( ' data-kuba-api="%s"', esc_attr( KUBA_LABS_WIDGET_API_BASE ) );
+		}
+
 		printf(
-			'<script src="%s" data-kuba-key="%s" defer></script>',
+			'<script src="%s" data-kuba-key="%s"%s defer></script>',
 			esc_url( KUBA_LABS_FRONTEND_BASE . '/widget.js' ),
-			esc_attr( $store_id )
+			esc_attr( $widget_key ),
+			$api_attr
 		);
 	}
 }

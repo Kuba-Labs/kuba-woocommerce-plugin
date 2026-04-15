@@ -21,6 +21,11 @@ class Settings extends \WC_Settings_Page {
 		add_action( 'woocommerce_sections_' . $this->id, [ $this, 'render_connection_status' ] );
 
 		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_admin_styles' ] );
+
+		// Custom field type for status mapping.
+		add_action( 'woocommerce_admin_field_kuba_status_mapping', [ $this, 'render_status_mapping' ] );
+		add_action( 'woocommerce_settings_save_' . $this->id, [ $this, 'save_status_mapping' ] );
+
 		// Disconnect hook registered separately in Plugin::init() — see class-kuba-plugin.php.
 	}
 
@@ -65,6 +70,58 @@ class Settings extends \WC_Settings_Page {
 			[
 				'type' => 'sectionend',
 				'id'   => 'kuba_labs_checkout_section',
+			],
+			[
+				'title' => __( 'WhatsApp Widget', 'kuba-labs' ),
+				'type'  => 'title',
+				'desc'  => __( 'Show a WhatsApp button on your storefront. Configure the widget appearance in your Kuba Labs dashboard.', 'kuba-labs' ),
+				'id'    => 'kuba_labs_widget_section',
+			],
+			[
+				'title'   => __( 'Enable widget', 'kuba-labs' ),
+				'type'    => 'checkbox',
+				'id'      => 'kuba_labs_widget_enabled',
+				'default' => 'yes',
+				'desc'    => __( 'Show WhatsApp chat button on your store.', 'kuba-labs' ),
+			],
+			[
+				'type' => 'sectionend',
+				'id'   => 'kuba_labs_widget_section',
+			],
+			[
+				'title' => __( 'Order Status Mapping', 'kuba-labs' ),
+				'type'  => 'title',
+				'desc'  => __( 'Map your WooCommerce order statuses to Kuba events. This controls which automations trigger when an order changes status.', 'kuba-labs' ),
+				'id'    => 'kuba_labs_status_mapping_section',
+			],
+			[
+				'type' => 'kuba_status_mapping',
+				'id'   => 'kuba_labs_status_map',
+			],
+			[
+				'type' => 'sectionend',
+				'id'   => 'kuba_labs_status_mapping_section',
+			],
+			[
+				'title' => __( 'Shipment Tracking', 'kuba-labs' ),
+				'type'  => 'title',
+				'desc'  => __( 'Choose how shipment tracking events (shipped, in delivery, delivered) are detected.', 'kuba-labs' ),
+				'id'    => 'kuba_labs_tracking_section',
+			],
+			[
+				'title'   => __( 'Tracking mode', 'kuba-labs' ),
+				'type'    => 'select',
+				'id'      => 'kuba_labs_tracking_mode',
+				'default' => 'kuba',
+				'options' => [
+					'kuba'       => __( 'Kuba tracking — we monitor the tracking code via 17track', 'kuba-labs' ),
+					'woocommerce' => __( 'Store-managed — my plugins handle shipping statuses (e.g. ShipStation, AST)', 'kuba-labs' ),
+				],
+				'desc'    => __( 'If your store has plugins that set shipping statuses (shipped, delivered, etc.), choose "Store-managed" to avoid duplicate notifications.', 'kuba-labs' ),
+			],
+			[
+				'type' => 'sectionend',
+				'id'   => 'kuba_labs_tracking_section',
 			],
 		];
 	}
@@ -150,11 +207,18 @@ class Settings extends \WC_Settings_Page {
 	}
 
 	private function render_disconnected_state( string $store_id ): void {
+		$connect_token = get_transient( 'kuba_labs_connect_token' );
+		if ( empty( $connect_token ) ) {
+			$connect_token = wp_generate_password( 48, false );
+			set_transient( 'kuba_labs_connect_token', $connect_token, HOUR_IN_SECONDS );
+		}
+
 		$connect_url = add_query_arg(
 			[
-				'store_id'     => $store_id,
-				'store_url'    => rawurlencode( get_site_url() ),
-				'callback_url' => rawurlencode( rest_url( 'kuba-labs/v1/connect' ) ),
+				'store_id'      => $store_id,
+				'store_url'     => rawurlencode( get_site_url() ),
+				'callback_url'  => rawurlencode( rest_url( 'kuba-labs/v1/connect' ) ),
+				'connect_token' => $connect_token,
 			],
 			KUBA_LABS_FRONTEND_BASE . '/connect/woocommerce'
 		);
@@ -188,5 +252,99 @@ class Settings extends \WC_Settings_Page {
 			</p>
 		</div>
 		<?php
+	}
+
+	// ------------------------------------------------------------------
+	// Status mapping — custom WC settings field
+	// ------------------------------------------------------------------
+
+	/** Kuba events a WC status can be mapped to. */
+	private static function kuba_events(): array {
+		return [
+			''                => __( '— ignore —', 'kuba-labs' ),
+			'date_created'    => __( 'New order', 'kuba-labs' ),
+			'date_shipped'    => __( 'Order shipped', 'kuba-labs' ),
+			'OutForDelivery'  => __( 'Out for delivery', 'kuba-labs' ),
+			'Delivered'       => __( 'Delivered', 'kuba-labs' ),
+			'cancelled'       => __( 'Order cancelled', 'kuba-labs' ),
+			'refunded'        => __( 'Order refunded', 'kuba-labs' ),
+		];
+	}
+
+	/** Default mapping for standard WC statuses. */
+	public static function default_status_map(): array {
+		return [
+			'completed'  => 'Delivered',
+			'cancelled'  => 'cancelled',
+			'refunded'   => 'refunded',
+			'processing' => '',
+			'on-hold'    => '',
+			'failed'     => '',
+		];
+	}
+
+	/** Get the saved mapping, merged with defaults for any new statuses. */
+	public static function get_status_map(): array {
+		$saved    = get_option( 'kuba_labs_status_map', [] );
+		$defaults = self::default_status_map();
+		return is_array( $saved ) ? array_merge( $defaults, $saved ) : $defaults;
+	}
+
+	public function render_status_mapping( $value ): void {
+		$statuses    = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : [];
+		$mapping     = self::get_status_map();
+		$kuba_events = self::kuba_events();
+		?>
+		<tr>
+			<td colspan="2" style="padding: 0;">
+				<table class="widefat striped" style="max-width: 600px;">
+					<thead>
+						<tr>
+							<th><?php esc_html_e( 'WooCommerce Status', 'kuba-labs' ); ?></th>
+							<th><?php esc_html_e( 'Kuba Event', 'kuba-labs' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php foreach ( $statuses as $slug => $label ) :
+							// WC status slugs have 'wc-' prefix, strip it.
+							$status_key = str_replace( 'wc-', '', $slug );
+							// Skip internal statuses handled separately by the plugin.
+							if ( 'checkout-draft' === $status_key ) { continue; }
+							$current    = $mapping[ $status_key ] ?? '';
+						?>
+						<tr>
+							<td><?php echo esc_html( $label ); ?> <code><?php echo esc_html( $status_key ); ?></code></td>
+							<td>
+								<select name="kuba_labs_status_map[<?php echo esc_attr( $status_key ); ?>]">
+									<?php foreach ( $kuba_events as $event_value => $event_label ) : ?>
+										<option value="<?php echo esc_attr( $event_value ); ?>"
+											<?php selected( $current, $event_value ); ?>>
+											<?php echo esc_html( $event_label ); ?>
+										</option>
+									<?php endforeach; ?>
+								</select>
+							</td>
+						</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			</td>
+		</tr>
+		<?php
+	}
+
+	public function save_status_mapping(): void {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing — WC handles nonce.
+		if ( isset( $_POST['kuba_labs_status_map'] ) && is_array( $_POST['kuba_labs_status_map'] ) ) {
+			$raw = array_map( 'sanitize_text_field', wp_unslash( $_POST['kuba_labs_status_map'] ) );
+			$valid_events = array_keys( self::kuba_events() );
+			$clean = [];
+			foreach ( $raw as $status => $event ) {
+				if ( in_array( $event, $valid_events, true ) ) {
+					$clean[ sanitize_key( $status ) ] = $event;
+				}
+			}
+			update_option( 'kuba_labs_status_map', $clean );
+		}
 	}
 }

@@ -83,3 +83,4 @@ These are deterministic across all setups (set by `setup.sh`):
 | Webhook Secret   | `test-webhook-secret-for-local-e2e`            |
 | Consumer Key     | `ck_localdev_kuba_e2e_fixed_key`               |
 | Consumer Secret  | `cs_localdev_kuba_e2e_fixed_secret_for_testing`|
+| Widget Key       | `a0000000-0000-0000-0000-000000000001`         |

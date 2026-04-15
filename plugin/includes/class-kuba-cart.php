@@ -25,6 +25,19 @@ class Cart {
 		}
 
 		$raw = sanitize_text_field( wp_unslash( $_GET['kuba_cart'] ) ); // phpcs:ignore WordPress.Security.NonceVerification
+
+		// Verify HMAC signature to prevent CSRF cart manipulation.
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		$signature      = sanitize_text_field( wp_unslash( $_GET['kuba_sig'] ?? '' ) );
+		$webhook_secret = get_option( 'kuba_labs_webhook_secret', '' );
+		if ( empty( $signature ) || empty( $webhook_secret ) ) {
+			return;
+		}
+		$expected = hash_hmac( 'sha256', $raw, $webhook_secret );
+		if ( ! hash_equals( $expected, $signature ) ) {
+			return;
+		}
+
 		$items = $this->parse_cart_param( $raw );
 
 		if ( empty( $items ) ) {

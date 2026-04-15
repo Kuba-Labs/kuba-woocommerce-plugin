@@ -71,21 +71,65 @@ register_activation_hook( __FILE__, function () {
 
 // Redirect to settings on first activation.
 add_action( 'admin_init', function () {
-	if ( get_transient( 'kuba_labs_activated' ) ) {
-		delete_transient( 'kuba_labs_activated' );
-		wp_safe_redirect( admin_url( 'admin.php?page=wc-settings&tab=kuba_labs' ) );
-		exit;
+	if ( ! get_transient( 'kuba_labs_activated' ) ) {
+		return;
 	}
+	delete_transient( 'kuba_labs_activated' );
+
+	// Don't redirect on bulk activation, AJAX, or network admin.
+	if ( isset( $_GET['activate-multi'] ) || wp_doing_ajax() || is_network_admin() ) {
+		return;
+	}
+
+	wp_safe_redirect( admin_url( 'admin.php?page=wc-settings&tab=kuba_labs' ) );
+	exit;
 } );
 
-// Clean up scheduled actions on deactivation.
+// Notify the Kuba backend, clear connection state, and clean up on deactivation.
 register_deactivation_hook( __FILE__, function () {
+	// Notify backend first — needs the webhook secret for HMAC signing.
+	kuba_labs_notify_disconnect();
+
+	// Clear connection state so reactivation shows "Not connected".
+	// Store ID is kept — it's stable across connections.
+	delete_option( 'kuba_labs_webhook_secret' );
+	delete_option( 'kuba_labs_connected_at' );
+	delete_option( 'kuba_labs_widget_key' );
+
 	if ( function_exists( 'as_unschedule_all_actions' ) ) {
 		as_unschedule_all_actions( 'kuba_labs_send_event', null, 'kuba-labs' );
 		as_unschedule_all_actions( 'kuba_labs_check_abandoned', null, 'kuba-labs' );
 		as_unschedule_all_actions( 'kuba_labs_sweep_abandoned', null, 'kuba-labs' );
 	}
 } );
+
+/**
+ * Send a signed disconnect request to the Kuba backend so it can mark the
+ * store as inactive.
+ */
+function kuba_labs_notify_disconnect(): void {
+	$webhook_secret = get_option( 'kuba_labs_webhook_secret', '' );
+	$store_id       = get_option( 'kuba_labs_store_id', '' );
+	$api_base       = defined( 'KUBA_LABS_API_BASE' ) ? KUBA_LABS_API_BASE : 'https://api.kubalabs.com';
+
+	if ( empty( $webhook_secret ) || empty( $store_id ) ) {
+		return;
+	}
+
+	$payload   = wp_json_encode( [ 'reason' => 'plugin_deactivated' ] );
+	$signature = hash_hmac( 'sha256', $payload, $webhook_secret );
+
+	wp_remote_post( $api_base . '/shops/woocommerce/disconnect', [
+		'timeout'  => 5,
+		'blocking' => true,
+		'headers'  => [
+			'Content-Type'           => 'application/json',
+			'X-WC-Store-Id'          => $store_id,
+			'X-WC-Webhook-Signature' => $signature,
+		],
+		'body' => $payload,
+	] );
+}
 
 // Bootstrap the plugin after all plugins are loaded.
 add_action( 'plugins_loaded', function () {
