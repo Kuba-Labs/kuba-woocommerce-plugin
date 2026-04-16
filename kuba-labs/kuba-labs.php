@@ -1,7 +1,6 @@
 <?php
 /**
  * Plugin Name: Kuba Labs for WooCommerce
- * Plugin URI:  https://kubalabs.com
  * Description: Connect your WooCommerce store to Kuba Labs for automated messaging, order notifications, and abandoned cart recovery.
  * Version:     1.0.0
  * Author:      Kuba Labs
