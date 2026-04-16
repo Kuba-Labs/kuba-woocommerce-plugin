@@ -60,7 +60,7 @@ WooCommerce Action Scheduler doesn't auto-flush in local dev (no traffic = no WP
 
 ## Development
 
-The plugin source at `./plugin/` is live-mounted into the container. Edit PHP files and refresh -- no rebuild needed.
+The plugin source at `./kuba-labs/` is live-mounted into the container. Edit PHP files and refresh -- no rebuild needed.
 
 ## Testing orders
 

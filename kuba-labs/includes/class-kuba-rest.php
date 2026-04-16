@@ -24,7 +24,11 @@ class REST {
 		register_rest_route( 'kuba-labs/v1', '/connect', [
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'handle_connect' ],
-			'permission_callback' => '__return_true',
+			// Endpoint is opened only while a pending connection exists (token
+			// generated when the merchant clicks "Connect" in WC settings).
+			// Request is further authenticated inside the handler via HMAC
+			// signature over the raw body, using that same single-use token.
+			'permission_callback' => [ $this, 'check_pending_connection' ],
 		] );
 
 		register_rest_route( 'kuba-labs/v1', '/policies', [
@@ -37,7 +41,7 @@ class REST {
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'handle_consent' ],
 			'permission_callback' => function () {
-				return wp_verify_nonce( sanitize_text_field( $_SERVER['HTTP_X_WP_NONCE'] ?? '' ), 'wp_rest' );
+				return wp_verify_nonce( sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_WP_NONCE'] ?? '' ) ), 'wp_rest' );
 			},
 			'args'                => [
 				'phone'         => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
@@ -50,7 +54,7 @@ class REST {
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'handle_checkout_capture' ],
 			'permission_callback' => function () {
-				return wp_verify_nonce( sanitize_text_field( $_SERVER['HTTP_X_WP_NONCE'] ?? '' ), 'wp_rest' );
+				return wp_verify_nonce( sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_WP_NONCE'] ?? '' ) ), 'wp_rest' );
 			},
 			'args'                => [
 				'phone'      => [ 'sanitize_callback' => 'sanitize_text_field' ],
@@ -76,26 +80,28 @@ class REST {
 	}
 
 	/**
-	 * Verify that the request contains valid WooCommerce REST API credentials.
-	 * Supports Basic Auth (HTTPS) and query param auth (consumer_key/consumer_secret).
+	 * Gate the /connect endpoint: only allow requests while a pending
+	 * connection exists. The real authentication (HMAC signature check)
+	 * happens inside handle_connect().
+	 */
+	public function check_pending_connection(): bool {
+		return ! empty( get_transient( 'kuba_labs_connect_token' ) );
+	}
+
+	/**
+	 * Verify that the request contains valid WooCommerce REST API credentials
+	 * via HTTP Basic Auth over HTTPS.
 	 */
 	public function check_wc_api_key_permission( \WP_REST_Request $request ): bool {
-		// Try Basic Auth header first.
-		$consumer_key    = '';
-		$consumer_secret = '';
-
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
-		if ( ! empty( $_SERVER['PHP_AUTH_USER'] ) ) {
-			$consumer_key    = sanitize_text_field( $_SERVER['PHP_AUTH_USER'] );
-			$consumer_secret = sanitize_text_field( $_SERVER['PHP_AUTH_PW'] ?? '' );
+		// Basic Auth over HTTPS only — we intentionally do not accept
+		// credentials in query params (they leak into access logs, referer
+		// headers, and browser history).
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- REST endpoint authenticates via WC consumer key/secret, not WP nonces.
+		if ( empty( $_SERVER['PHP_AUTH_USER'] ) ) {
+			return false;
 		}
-		// Fall back to query params.
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended
-		if ( empty( $consumer_key ) && ! empty( $_GET['consumer_key'] ) ) {
-			$consumer_key    = sanitize_text_field( wp_unslash( $_GET['consumer_key'] ) );
-			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
-			$consumer_secret = sanitize_text_field( wp_unslash( $_GET['consumer_secret'] ?? '' ) );
-		}
+		$consumer_key    = sanitize_text_field( wp_unslash( $_SERVER['PHP_AUTH_USER'] ) );
+		$consumer_secret = sanitize_text_field( wp_unslash( $_SERVER['PHP_AUTH_PW'] ?? '' ) );
 
 		if ( empty( $consumer_key ) || empty( $consumer_secret ) ) {
 			return false;
@@ -103,9 +109,11 @@ class REST {
 
 		// WC stores hashed consumer_key in the DB.
 		global $wpdb;
+		$table = $wpdb->prefix . 'woocommerce_api_keys';
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$row = $wpdb->get_row( $wpdb->prepare(
-			"SELECT consumer_secret, permissions FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s",
+			'SELECT consumer_secret, permissions FROM %i WHERE consumer_key = %s',
+			$table,
 			wc_api_hash( $consumer_key )
 		) );
 
@@ -117,13 +125,24 @@ class REST {
 	}
 
 	/**
-	 * Save WhatsApp consent from the checkout page.
+	 * Save messaging consent from the checkout page.
 	 * Called immediately when the customer toggles the checkbox.
 	 */
 	public function handle_consent( \WP_REST_Request $request ): \WP_REST_Response {
 		$phone         = $request->get_param( 'phone' );
 		$consent       = (bool) $request->get_param( 'consent' );
 		$session_token = $request->get_param( 'session_token' );
+
+		if ( empty( $session_token ) ) {
+			return new \WP_REST_Response( [ 'skipped' => true ], 200 );
+		}
+
+		// Rate-limit: at most one consent write per session every 2 seconds.
+		$throttle = '_kuba_consent_throttle_' . md5( $session_token );
+		if ( get_transient( $throttle ) ) {
+			return new \WP_REST_Response( [ 'skipped' => true ], 200 );
+		}
+		set_transient( $throttle, 1, 2 );
 
 		Consent_Table::save_consent( $phone, $consent, $session_token );
 
@@ -149,11 +168,14 @@ class REST {
 		// stable key from the WC session cookie the browser already has.
 		$session_key = '';
 		foreach ( $_COOKIE as $name => $value ) {
-			if ( str_starts_with( $name, 'wp_woocommerce_session_' ) ) {
-				// Cookie value is "customer_id||expiry||expiring||hash".
-				$session_key = explode( '||', $value )[0] ?? '';
-				break;
+			if ( ! is_string( $name ) || ! str_starts_with( $name, 'wp_woocommerce_session_' ) ) {
+				continue;
 			}
+			$raw_value   = sanitize_text_field( wp_unslash( $value ) );
+			// Cookie value is "customer_id||expiry||expiring||hash".
+			$parts       = explode( '||', $raw_value );
+			$session_key = $parts[0] ?? '';
+			break;
 		}
 		if ( empty( $session_key ) ) {
 			return new \WP_REST_Response( [ 'skipped' => true ], 200 );
@@ -214,6 +236,7 @@ class REST {
 			$seen_ids[ $page_id ] = true;
 			$policies[] = [
 				'title'   => $page->post_title ?: $fallback_title,
+				// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Applying WordPress core filter, not registering a new hook.
 				'content' => apply_filters( 'the_content', $page->post_content ),
 			];
 		}

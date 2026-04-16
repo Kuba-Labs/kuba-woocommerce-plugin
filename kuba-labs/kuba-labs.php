@@ -1,19 +1,18 @@
 <?php
 /**
- * Plugin Name: Kuba Labs - WhatsApp Marketing for WooCommerce
+ * Plugin Name: Kuba Labs for WooCommerce
  * Plugin URI:  https://kubalabs.com
- * Description: Connect your WooCommerce store to Kuba Labs for automated WhatsApp marketing, order notifications, and abandoned cart recovery.
+ * Description: Connect your WooCommerce store to Kuba Labs for automated messaging, order notifications, and abandoned cart recovery.
  * Version:     1.0.0
  * Author:      Kuba Labs
  * Author URI:  https://kubalabs.com
  * License:     GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: kuba-labs
- * Domain Path: /languages
  *
  * Requires at least: 6.8
- * Tested up to: 6.8
- * Requires PHP: 7.4
+ * Tested up to: 6.9
+ * Requires PHP: 8.0
  *
  * Requires Plugins: woocommerce
  * WC requires at least: 8.0
@@ -65,23 +64,59 @@ register_activation_hook( __FILE__, function () {
 	require_once KUBA_LABS_PLUGIN_DIR . 'includes/class-kuba-consent-table.php';
 	Kuba_Labs\Consent_Table::create_table();
 
-	// Redirect to settings page after activation.
-	set_transient( 'kuba_labs_activated', true, 30 );
+	// Flag the first activation so we can prompt the merchant to configure.
+	update_option( 'kuba_labs_show_welcome_notice', '1', false );
 } );
 
-// Redirect to settings on first activation.
+// Show a dismissible welcome notice on first activation pointing to the
+// settings page. WP.org reviewers push back on forced activation redirects,
+// so a notice with a clear CTA is the accepted pattern.
+add_action( 'admin_notices', function () {
+	if ( '1' !== get_option( 'kuba_labs_show_welcome_notice' ) ) {
+		return;
+	}
+	if ( ! current_user_can( 'manage_woocommerce' ) ) {
+		return;
+	}
+
+	$settings_url = admin_url( 'admin.php?page=wc-settings&tab=kuba_labs' );
+	$dismiss_url  = wp_nonce_url(
+		add_query_arg( 'kuba_labs_dismiss_welcome', '1', admin_url() ),
+		'kuba_labs_dismiss_welcome'
+	);
+	?>
+	<div class="notice notice-info is-dismissible">
+		<p>
+			<strong><?php esc_html_e( 'Kuba Labs is ready to connect.', 'kuba-labs' ); ?></strong>
+			<?php esc_html_e( 'Finish setup to start syncing orders and events.', 'kuba-labs' ); ?>
+		</p>
+		<p>
+			<a href="<?php echo esc_url( $settings_url ); ?>" class="button button-primary">
+				<?php esc_html_e( 'Configure Kuba Labs', 'kuba-labs' ); ?>
+			</a>
+			<a href="<?php echo esc_url( $dismiss_url ); ?>" class="button-link" style="margin-left:10px;">
+				<?php esc_html_e( 'Dismiss', 'kuba-labs' ); ?>
+			</a>
+		</p>
+	</div>
+	<?php
+} );
+
+// Dismiss the welcome notice (triggered by the "Dismiss" link and by WP's
+// built-in dismiss button via admin-ajax).
 add_action( 'admin_init', function () {
-	if ( ! get_transient( 'kuba_labs_activated' ) ) {
+	if ( ! current_user_can( 'manage_woocommerce' ) ) {
 		return;
 	}
-	delete_transient( 'kuba_labs_activated' );
-
-	// Don't redirect on bulk activation, AJAX, or network admin.
-	if ( isset( $_GET['activate-multi'] ) || wp_doing_ajax() || is_network_admin() ) {
+	if ( ! isset( $_GET['kuba_labs_dismiss_welcome'] ) ) {
 		return;
 	}
-
-	wp_safe_redirect( admin_url( 'admin.php?page=wc-settings&tab=kuba_labs' ) );
+	$nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+	if ( ! wp_verify_nonce( $nonce, 'kuba_labs_dismiss_welcome' ) ) {
+		return;
+	}
+	delete_option( 'kuba_labs_show_welcome_notice' );
+	wp_safe_redirect( remove_query_arg( [ 'kuba_labs_dismiss_welcome', '_wpnonce' ] ) );
 	exit;
 } );
 
@@ -95,6 +130,7 @@ register_deactivation_hook( __FILE__, function () {
 	delete_option( 'kuba_labs_webhook_secret' );
 	delete_option( 'kuba_labs_connected_at' );
 	delete_option( 'kuba_labs_widget_key' );
+	delete_option( 'kuba_labs_show_welcome_notice' );
 
 	if ( function_exists( 'as_unschedule_all_actions' ) ) {
 		as_unschedule_all_actions( 'kuba_labs_send_event', null, 'kuba-labs' );

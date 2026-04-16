@@ -62,7 +62,11 @@ final class Plugin {
 
 	public static function handle_disconnect(): void {
 		if ( ! current_user_can( 'manage_woocommerce' ) ) {
-			wp_die( 'Unauthorized' );
+			wp_die(
+				esc_html__( 'You do not have permission to disconnect from Kuba Labs.', 'kuba-labs' ),
+				esc_html__( 'Unauthorized', 'kuba-labs' ),
+				[ 'response' => 403 ]
+			);
 		}
 		check_admin_referer( 'kuba_labs_disconnect' );
 

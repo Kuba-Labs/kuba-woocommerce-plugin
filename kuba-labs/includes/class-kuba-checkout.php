@@ -192,10 +192,11 @@ class Checkout {
 		if ( empty( $country_iso ) && is_array( $posted_data ) && ! empty( $posted_data['kuba_country_code'] ) ) {
 			$country_iso = sanitize_text_field( $posted_data['kuba_country_code'] );
 		}
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- Called from WC checkout hook, which verifies its own nonce.
 		if ( empty( $country_iso ) && ! empty( $_POST['kuba_country_code'] ) ) {
 			$country_iso = sanitize_text_field( wp_unslash( $_POST['kuba_country_code'] ) );
 		}
+		// phpcs:enable WordPress.Security.NonceVerification.Missing
 		if ( empty( $country_iso ) ) {
 			return;
 		}
@@ -249,10 +250,11 @@ class Checkout {
 		if ( '' === $consent ) {
 			$consent = $order->get_meta( '_wc_billing/' . self::FIELD_WHATSAPP_CONSENT );
 		}
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- Called from WC checkout hook, which verifies its own nonce.
 		if ( '' === $consent && isset( $_POST['kuba_whatsapp_consent'] ) ) {
 			$consent = sanitize_text_field( wp_unslash( $_POST['kuba_whatsapp_consent'] ) );
 		}
+		// phpcs:enable WordPress.Security.NonceVerification.Missing
 
 		$is_opted_in = in_array( $consent, [ '1', 'true', true, 1 ], true );
 

@@ -203,13 +203,13 @@ class Sender {
 
 		// Throw on failure so Action Scheduler retries.
 		if ( is_wp_error( $response ) ) {
-			throw new \Exception( 'Kuba API request failed: ' . $response->get_error_message() );
+			throw new \Exception( esc_html( 'Kuba API request failed: ' . $response->get_error_message() ) );
 		}
 
 		$code = wp_remote_retrieve_response_code( $response );
 		if ( $code < 200 || $code >= 300 ) {
 			$body = wp_remote_retrieve_body( $response );
-			throw new \Exception( "Kuba API returned HTTP {$code}: {$body}" );
+			throw new \Exception( esc_html( "Kuba API returned HTTP {$code}: {$body}" ) );
 		}
 	}
 }

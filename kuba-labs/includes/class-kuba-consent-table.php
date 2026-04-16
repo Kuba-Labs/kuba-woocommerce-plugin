@@ -43,8 +43,8 @@ class Consent_Table {
 	public static function drop_table(): void {
 		global $wpdb;
 		$table = $wpdb->prefix . self::TABLE_NAME;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		$wpdb->query( "DROP TABLE IF EXISTS {$table}" );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.SchemaChange, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Schema change on uninstall; caching doesn't apply.
+		$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $table ) );
 	}
 
 	/**
@@ -57,7 +57,8 @@ class Consent_Table {
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$existing = $wpdb->get_var( $wpdb->prepare(
-			"SELECT id FROM {$table} WHERE session_token = %s LIMIT 1",
+			'SELECT id FROM %i WHERE session_token = %s LIMIT 1',
+			$table,
 			$session_token
 		) );
 
@@ -115,7 +116,8 @@ class Consent_Table {
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		return $wpdb->get_row( $wpdb->prepare(
-			"SELECT * FROM {$table} WHERE session_token = %s ORDER BY id DESC LIMIT 1",
+			'SELECT * FROM %i WHERE session_token = %s ORDER BY id DESC LIMIT 1',
+			$table,
 			$session_token
 		) );
 	}

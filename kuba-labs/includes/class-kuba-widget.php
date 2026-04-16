@@ -5,15 +5,20 @@ namespace Kuba_Labs;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Injects the Kuba Labs WhatsApp widget on the storefront.
+ * Injects the Kuba Labs messaging widget on the storefront.
  *
  * Uses the same widget.js that the Shopify integration and standalone embed use.
  * The store_id doubles as the widget public key.
  */
 class Widget {
 
+	// WP renders the tag with id="{HANDLE}-js" — keep the handle so the DOM
+	// id lines up with "kuba-widget-js" referenced by the fallback snippet.
+	const HANDLE = 'kuba-widget';
+
 	public function __construct() {
-		add_action( 'wp_footer', [ $this, 'render_widget_script' ] );
+		add_action( 'wp_enqueue_scripts', [ $this, 'enqueue_widget_script' ] );
+		add_filter( 'script_loader_tag', [ $this, 'add_widget_data_attributes' ], 10, 2 );
 		add_action( 'wp_head', [ $this, 'render_head_fallback' ] );
 	}
 
@@ -41,23 +46,42 @@ class Widget {
 		return defined( 'KUBA_LABS_WIDGET_API_BASE' ) ? KUBA_LABS_WIDGET_API_BASE : '';
 	}
 
-	public function render_widget_script(): void {
+	public function enqueue_widget_script(): void {
 		if ( ! $this->should_render() ) {
 			return;
 		}
 
-		$widget_key = get_option( 'kuba_labs_widget_key', '' );
-		$api_attr   = '';
-		if ( $this->get_api_base() ) {
-			$api_attr = sprintf( ' data-kuba-api="%s"', esc_attr( $this->get_api_base() ) );
+		wp_register_script(
+			self::HANDLE,
+			$this->get_script_url(),
+			[],
+			KUBA_LABS_VERSION,
+			[
+				'in_footer' => true,
+				'strategy'  => 'defer',
+			]
+		);
+		wp_enqueue_script( self::HANDLE );
+	}
+
+	/**
+	 * Inject data-kuba-key and data-kuba-api onto the widget <script> tag.
+	 * WordPress has no first-class API for custom data-* attrs on enqueued
+	 * scripts, so we filter the rendered tag.
+	 */
+	public function add_widget_data_attributes( string $tag, string $handle ): string {
+		if ( self::HANDLE !== $handle ) {
+			return $tag;
 		}
 
-		printf(
-			'<script id="kuba-widget-js" src="%s" data-kuba-key="%s"%s defer></script>',
-			esc_url( $this->get_script_url() ),
-			esc_attr( $widget_key ),
-			$api_attr
-		);
+		$widget_key = get_option( 'kuba_labs_widget_key', '' );
+		$attrs      = sprintf( ' data-kuba-key="%s"', esc_attr( $widget_key ) );
+
+		if ( $this->get_api_base() ) {
+			$attrs .= sprintf( ' data-kuba-api="%s"', esc_attr( $this->get_api_base() ) );
+		}
+
+		return str_replace( ' src=', $attrs . ' src=', $tag );
 	}
 
 	/**

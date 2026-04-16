@@ -334,7 +334,7 @@ class Settings extends \WC_Settings_Page {
 	}
 
 	public function save_status_mapping(): void {
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing — WC handles nonce.
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- WC settings save hook runs after WC verifies its own nonce.
 		if ( isset( $_POST['kuba_labs_status_map'] ) && is_array( $_POST['kuba_labs_status_map'] ) ) {
 			$raw = array_map( 'sanitize_text_field', wp_unslash( $_POST['kuba_labs_status_map'] ) );
 			$valid_events = array_keys( self::kuba_events() );
@@ -346,5 +346,6 @@ class Settings extends \WC_Settings_Page {
 			}
 			update_option( 'kuba_labs_status_map', $clean );
 		}
+		// phpcs:enable WordPress.Security.NonceVerification.Missing
 	}
 }
